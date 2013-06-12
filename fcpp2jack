@@ -1,0 +1,122 @@
+#!/bin/bash
+
+OSCDEFS=""
+
+# Adapted from faust2jack:
+#####################################################################
+#                                                                   #
+#               Compiles Faust programs to jack-gtk                 #
+#               (c) Grame, 2009-2011                                #
+#                                                                   #
+#####################################################################
+# Modification by Tim O'Brien 2013
+
+#-------------------------------------------------------------------
+# Set Faust include path
+
+if [ -f $FAUST_LIB_PATH/music.lib ]
+then
+  FAUSTLIB=$FAUST_LIB_PATH
+elif [ -f /usr/local/lib/faust/music.lib ]
+then
+  FAUSTLIB=/usr/local/lib/faust/
+elif [ -f /usr/lib/faust/music.lib ]
+then
+  FAUSTLIB=/usr/lib/faust/
+else
+  error "$0: Cannot find Faust library dir (usually /usr/local/lib/faust)"
+fi
+
+
+#-------------------------------------------------------------------
+# Check darwin specifics
+#
+if [[ $(uname) == Darwin ]]; then
+    MARCH=""
+else
+    MARCH="-march=native"
+fi
+
+#-------------------------------------------------------------------
+# Default compilation flags for gcc and icc :
+#
+MYGCCFLAGS="-O3 $MARCH -mfpmath=sse -msse -msse2 -msse3 -ffast-math -ftree-vectorize"
+MYICCFLAGS="-O3 -xHost -ftz -fno-alias -fp-model fast=2"
+
+
+#-------------------------------------------------------------------
+# Analyze command arguments :
+# faust options                 -> OPTIONS
+# if -omp : -openmp or -fopenmp -> OPENMP
+# existing *.cpp files          -> FILES
+#
+
+# PHASE 1 : Look for -icc option to force use of intel icc (actually icpc)
+# without having to configure CXX and CXXFLAGS
+CXX=g++
+CXXFLAGS=$MYGCCFLAGS
+for p in $@; do
+    if [ "$p" = -icc ]; then
+	CXX=icpc
+	CXXFLAGS=$MYICCFLAGS
+    fi
+done
+
+
+# PHASE 2 : dispatch command arguments
+for p in $@; do
+    if [ "$p" = -omp ]; then
+	if [[ $CXX == "icpc" ]]; then
+            OMP="-openmp"
+        else
+            OMP="-fopenmp"
+        fi
+    fi
+
+    if [ "$p" = -icc ]; then
+	ignore=" "
+    elif [ $p = "-osc" ]; then
+	OSCDEFS="-DOSCCTRL -L$FAUSTLIB -lOSCFaust -loscpack"
+    elif [ $p = "-httpd" ]; then
+	HTTPDEFS="-DHTTPCTRL -L$FAUSTLIB -lHTTPDFaust -lmicrohttpd"
+    elif [ $p = "-arch32" ]; then
+	PROCARCH="-m32 -L/usr/lib32"
+    elif [ $p = "-arch64" ]; then
+	PROCARCH="-m64"
+    elif [ ${p:0:1} = "-" ]; then
+	OPTIONS="$OPTIONS $p"
+    elif [[ -e "$p" ]]; then
+	FILES="$FILES $p"
+    else
+	OPTIONS="$OPTIONS $p"
+    fi
+done
+
+
+#-------------------------------------------------------------------
+# compile the *.cpp files for JACK-GTK on linux
+#
+SCRIPT_DIR=${0%/*}
+ARCH_DIR=$SCRIPT_DIR/architecture_files
+for f in $FILES; do
+
+	# compile faust to c++
+	ABS_INPUT_PATH=$(dirname "$f")
+	INPUT_FILE=${f##*/}
+	INPUT="$ABS_INPUT_PATH/$INPUT_FILE"
+	MYDSP=${INPUT_FILE%%.*} #base name of input .cpp file
+	./$SCRIPT_DIR/architecture_merge.py $INPUT $ARCH_DIR/jack-gtk.cpp
+
+	# compile c++ to binary
+	(
+		$CXX $CXXFLAGS $OMP "${MYDSP}_jack-gtk.cpp" `pkg-config --cflags --libs jack gtk+-2.0` $PROCARCH $OSCDEFS $HTTPDEFS -o "${MYDSP}" $OPTIONS
+	) > /dev/null
+
+	# collect binary file name for FaustWorks
+	BINARIES="$BINARIES${f%.dsp};"
+done
+
+
+echo $BINARIES
+
+
